@@ -118,17 +118,104 @@ router.post("/create-order", async (req, res) => {
     res.status(500).json({ message: "Error creating order", error: error.message });
   }
 });
-
-// ✅ Fetch Orders from Local DB
-router.get("/fetch-orders", async (req, res) => {
+// ✅ Fetch Orders from Local DB with tblorder, tblordertran, tblorderboxingo
+router.get("/orders", async (req, res) => {
   try {
-    const query = `SELECT * FROM tblorder ORDER BY DateTime DESC`; // ✅ Orders ko latest se sort karna
+    const localPool = getDBPool(false); // Local DB
+
+    const query = `
+      SELECT 
+        o.OrderNo, 
+        o.StoreName, 
+        o.DateTime, 
+        ot.Order_Qty,  -- ✅ Now taking from tblorder_tran
+        ot.Final_Qty
+      FROM tblorder o
+      LEFT JOIN tblorder_tran ot ON o.OrderNo = ot.OrderNo -- ✅ Joining correctly
+      ORDER BY o.DateTime DESC
+    `;
+
     const [orders] = await localPool.query(query);
-    
+
     res.json(orders);
   } catch (error) {
     console.error("Error fetching orders:", error);
     res.status(500).json({ message: "Error fetching orders" });
+  }
+});
+
+// ✅ Approve Order API (Fixed Column Names)
+router.post("/approve-order", async (req, res) => {
+  const { orderId, approvedQty, approvedBy } = req.body;
+
+  if (!orderId || !approvedQty || !approvedBy) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+
+  const localPool = getDBPool(false); // Local DB
+
+  try {
+    // 🟢 Step 1: Update `Final_Qty` in `tblorder_tran`
+    const updateOrderTranQuery = `
+      UPDATE tblorder_tran 
+      SET Final_Qty = ? 
+      WHERE OrderNo = ?
+    `;
+    const [orderTranResult] = await localPool.query(updateOrderTranQuery, [approvedQty, orderId]);
+
+    // 🟢 Step 2: Update `Approved_By` and `Approved_Date` in `tblorder`
+    const updateOrderQuery = `
+      UPDATE tblorder 
+      SET Order_Approved_By = ?, 
+          OrderComplete = 1, 
+          Order_Approved_Date = NOW() 
+      WHERE OrderNo = ?
+    `;
+    const [orderResult] = await localPool.query(updateOrderQuery, [approvedBy, orderId]);
+
+    // 🛑 Check if order exists
+    if (orderResult.affectedRows === 0 && orderTranResult.affectedRows === 0) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    res.json({ message: "Order approved successfully" });
+
+  } catch (error) {
+    console.error("Approval Error:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+// ✅ Pack Order API
+router.post("/pack-order", async (req, res) => {
+  const { orderId, packedBy } = req.body;
+
+  if (!orderId || !packedBy) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+
+  const localPool = getDBPool(false); // Local DB
+
+  try {
+    // 🟢 Step 1: Update `Order_Packed_By` and `Order_Packed_Date`
+    const updatePackedQuery = `
+      UPDATE tblorder 
+      SET Order_Packed_By = ?, 
+          Order_Packed_Date = NOW() 
+      WHERE OrderNo = ?
+    `;
+    
+    const [result] = await localPool.query(updatePackedQuery, [packedBy, orderId]);
+
+    // 🛑 Check if the order exists
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    res.json({ message: "Order packed successfully" });
+
+  } catch (error) {
+    console.error("Packing Error:", error);
+    res.status(500).json({ message: "Internal server error" });
   }
 });
 
