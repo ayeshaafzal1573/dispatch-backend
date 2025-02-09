@@ -1,19 +1,27 @@
+// server.js
+
 const express = require('express');
-const bodyParser = require('body-parser');
-const { getDBPool } = require('./db.js');
-
 const app = express();
-const port = process.env.PORT || 5000;
-
+const categoryRoutes = require('./routes/category');
+const productRoutes = require('./routes/product');
+const shopRoutes = require('./routes/shop');
+const orderRoutes = require('./routes/order');
+require('dotenv').config();
+const cors = require('cors');
 // Middleware
-app.use(bodyParser.json());
-
-// Routes
-app.get('/api/products', require('./controllers/productController.js').getProducts);
-app.post('/api/orders', require('./controllers/orderController').createOrder);
-app.post('/api/sync', require('./controllers/syncController').syncData);
-
-// Server
+app.use(express.json());  // for parsing application/json
+app.use(cors({
+  origin: "http://localhost:5173", // Frontend ka URL
+  methods: "GET,POST,PUT,DELETE",
+  credentials: true 
+}));
+// API routes
+app.use('/api', categoryRoutes);
+app.use('/api', productRoutes);
+app.use('/api', shopRoutes);
+app.use('/api', orderRoutes);
+// Starting the server
+const port = process.env.PORT || 4000;
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  console.log(`Server is running on port ${port}`);
 });
