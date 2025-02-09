@@ -6,7 +6,6 @@ const generateOrderNumber = () => {
   return `ORD-${Date.now()}`;
 };
 
-// Create Order API
 router.post("/create-order", async (req, res) => {
   const {
     DateTime,
@@ -28,9 +27,6 @@ router.post("/create-order", async (req, res) => {
     User,
   } = req.body;
 
-  if (!storeName) {
-    return res.status(400).json({ message: "Missing storeName field" });
-  }
 
   // ✅ Generate Order Number **only once**
   const OrderNo = generateOrderNumber();
@@ -43,10 +39,10 @@ router.post("/create-order", async (req, res) => {
 
     const cloudQuery = `
     INSERT INTO tblorders (
-      DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, 
+      DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, storeName, 
       Sub1No, Sub1Name, Order_Qty, Rcvd_Qty, Amended_Qty, Final_Qty, Amended_Shop, User
     ) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)
   `;
   
 
@@ -57,6 +53,7 @@ router.post("/create-order", async (req, res) => {
       StockDescription,
       MajorNo,
       MajorName,
+      storeName,  // ✅ Add storeName here
       Sub1No || null,   // ✅ Convert empty string to NULL
       Sub1Name || null,  // ✅ Convert empty string to NULL
       Order_Qty,
@@ -65,8 +62,7 @@ router.post("/create-order", async (req, res) => {
       Final_Qty || 0,
       Amended_Shop || null,
       User || null
-      ];
-    
+    ];
     
     await cloudPool.query(cloudQuery, values);
     console.log("✅ Inserted into Cloud DB:", OrderNo);
@@ -79,7 +75,7 @@ router.post("/create-order", async (req, res) => {
       VALUES (?, ?, ?, ?, ?)
     `;
 
-    await localPool.query(localOrderQuery, [DateTime, OrderNo, storeName, 0,User]);
+    await localPool.query(localOrderQuery, [DateTime, OrderNo, storeName, 0, User]);
     console.log("✅ Inserted into Local DB tblorder:", OrderNo);
 
     // ✅ Insert into Local DB (tblorder_tran)
@@ -117,7 +113,6 @@ router.post("/create-order", async (req, res) => {
     res.status(500).json({ message: "Error creating order", error: error.message });
   }
 });
-
 
 
 
@@ -350,7 +345,7 @@ const syncShopDB = async (orderId) => {
     
     // ✅ Correct the SQL query (it was missing a parameter)
     const [shopResult] = await shopPool.query(
-      "UPDATE tblorders SET Order_Dispatch_By = ?, Order_Dispatched_Date = NOW() WHERE OrderNo = ?",
+      "UPDATE tblorder SET Order_Dispatch_By = ?, Order_Dispatched_Date = NOW() WHERE OrderNo = ?",
       [order.Order_Dispatch_By, order.OrderNo] // Fixing missing parameter
     );
 
