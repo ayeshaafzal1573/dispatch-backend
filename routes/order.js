@@ -46,23 +46,24 @@ router.post("/create-order", async (req, res) => {
   `;
   
 
-    const values = [
-      DateTime,
-      OrderNo, 
-      StockCode,
-      StockDescription,
-      MajorNo,
-      MajorName,
-      storeName,  // ✅ Add storeName here
-      Sub1No || null,   // ✅ Convert empty string to NULL
-      Sub1Name || null,  // ✅ Convert empty string to NULL
-      Order_Qty,
-      Rcvd_Qty || 0,
-      Amended_Qty || 0,
-      Final_Qty || 0,
-      Amended_Shop || null,
-      User || null
-    ];
+  const values = [
+    DateTime,
+    OrderNo,
+    StockCode,
+    StockDescription,
+    MajorNo,
+    MajorName,
+    storeName,
+    Sub1No || null,
+    Sub1Name || null,
+    parseInt(Order_Qty) || 0, // ✅ Convert to Integer
+    parseInt(Rcvd_Qty) || 0, 
+    parseInt(Amended_Qty) || 0, 
+    parseInt(Final_Qty) || parseInt(Order_Qty) || 0, // ✅ Ensure Final_Qty has a valid number
+    Amended_Shop || null,
+    User || null
+  ];
+  
     
     await cloudPool.query(cloudQuery, values);
     console.log("✅ Inserted into Cloud DB:", OrderNo);
