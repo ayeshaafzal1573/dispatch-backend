@@ -25,6 +25,7 @@ router.post("/create-order", async (req, res) => {
     BoxNo,
     BoxCodeQty,
     BoxTotalQty,
+    User,
   } = req.body;
 
   if (!storeName) {
@@ -40,31 +41,33 @@ router.post("/create-order", async (req, res) => {
     const cloudPool = getDBPool(true);
     const localPool = getDBPool(false);
 
-    // ✅ Insert into Cloud DB (tblorders)
     const cloudQuery = `
-      INSERT INTO tblorders (
-        DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, 
-        Sub1No, Sub1Name, Order_Qty, Rcvd_Qty, Amended_Qty, Final_Qty, Amended_Shop
-      ) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
+    INSERT INTO tblorders (
+      DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, 
+      Sub1No, Sub1Name, Order_Qty, Rcvd_Qty, Amended_Qty, Final_Qty, Amended_Shop, User
+    ) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `;
+  
 
     const values = [
       DateTime,
-      OrderNo, // ✅ SAME OrderNo used here
+      OrderNo, 
       StockCode,
       StockDescription,
       MajorNo,
       MajorName,
-      Sub1No,
-      Sub1Name,
+      Sub1No || null,   // ✅ Convert empty string to NULL
+      Sub1Name || null,  // ✅ Convert empty string to NULL
       Order_Qty,
       Rcvd_Qty || 0,
       Amended_Qty || 0,
       Final_Qty || 0,
       Amended_Shop || null,
-    ];
-
+      User || null
+      ];
+    
+    
     await cloudPool.query(cloudQuery, values);
     console.log("✅ Inserted into Cloud DB:", OrderNo);
 
@@ -76,7 +79,7 @@ router.post("/create-order", async (req, res) => {
       VALUES (?, ?, ?, ?, ?)
     `;
 
-    await localPool.query(localOrderQuery, [DateTime, OrderNo, storeName, 0, "System"]);
+    await localPool.query(localOrderQuery, [DateTime, OrderNo, storeName, 0,User]);
     console.log("✅ Inserted into Local DB tblorder:", OrderNo);
 
     // ✅ Insert into Local DB (tblorder_tran)
@@ -133,6 +136,7 @@ SELECT
     o.Order_Approved_By,
     o.Order_Dispatch_By,
     o.Order_Dispatched_Date,
+    o.Order_Approved_Date,
     o.Order_Rcvd_Date,
     o.User,
     ot.Order_Qty,  
@@ -153,6 +157,7 @@ SELECT
     NULL AS Order_Approved_By,
     NULL AS Order_Dispatch_By,
     NULL AS Order_Dispatched_Date,
+      NULL AS Order_Approved_Date,
     NULL AS Order_Rcvd_Date,
     NULL AS User,
     ot.Order_Qty,  

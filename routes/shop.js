@@ -9,31 +9,24 @@ router.post("/create-shop", async (req, res) => {
   const { StoreName, userName, Password, PortNo, HostIP, Email, Roles, Permission } = req.body;
 
   try {
-      const localPool = getDBPool(false);
-     
-      // Insert into tblstores
-      const shopQuery = `INSERT INTO tblstores (Storename, userName, Password, PortNo, HostIP) VALUES (?, ?, ?, ?, ?)`;
-      const [shopResult] = await localPool.query(shopQuery, [StoreName, userName, Password, PortNo, HostIP]);
-      const shopId = shopResult.insertId; // Get the inserted shop ID
+    const localPool = getDBPool(false);
+    const hashedPassword = await bcrypt.hash(Password, 10); // Hash the password
 
-      // Insert into tblusers
-      const userQuery = `INSERT INTO tblusers (username, Email, Password, Roles, Permission, Created, StoreName) VALUES (?, ?, ?, ?, ?, NOW(), ?)`;
-      const [userResult] = await localPool.query(userQuery, [userName, Email, Password, Roles, Permission, StoreName]);
-      const userId = userResult.insertId; // Get the inserted user ID
+    // Insert into tblstores
+    const shopQuery = `INSERT INTO tblstores (Storename, userName, Password, PortNo, HostIP) VALUES (?, ?, ?, ?, ?)`;
+    const [shopResult] = await localPool.query(shopQuery, [StoreName, userName, hashedPassword, PortNo, HostIP]);
 
-      // Insert into tbluserstores
-      const userStoreQuery = `INSERT INTO tbluserstores (userId, storeId) VALUES (?, ?)`;
-      await localPool.query(userStoreQuery, [userId, shopId]);
+    // Insert into tblusers
+    const userQuery = `INSERT INTO tblusers (username, Email, Password, Roles, Permission, Created, StoreName) VALUES (?, ?, ?, ?, ?, NOW(), ?)`;
+    const [userResult] = await localPool.query(userQuery, [userName, Email, hashedPassword, Roles, Permission, StoreName]);
 
-      res.status(201).json({
-          message: "Shop and user created successfully",
-          shopId,
-          userId
-      });
+    res.status(201).json({
+      message: "Shop and user created successfully",
+    });
 
   } catch (error) {
-      console.error(error);
-      res.status(500).json({ message: "Error creating shop", error: error.message });
+    console.error(error);
+    res.status(500).json({ message: "Error creating shop", error: error.message });
   }
 });
 router.get('/shops', async (req, res) => {

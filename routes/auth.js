@@ -47,35 +47,62 @@ router.post("/register", async (req, res) => {
 
 // ✅ User Login API
 router.post("/login", async (req, res) => {
-    const { username, password } = req.body;
+    const { Email, password } = req.body;
 
     try {
         const pool = getDBPool(false); // Default to local DB
-        const usersTable = process.env.DB_ENV === "cloud" ? "tbl_store_users" : "tblusers";
-
-        // ✅ Find user
-        const [users] = await pool.query(`SELECT * FROM ${usersTable} WHERE username = ?`, [username]);
+      
+        // ✅ Find user (Case-insensitive email search)
+        const [users] = await pool.query(`SELECT * FROM tblusers WHERE LOWER(Email) = LOWER(?)`, [Email]);
         if (users.length === 0) return res.status(400).json({ message: "User not found" });
 
         const user = users[0];
+
+        // ✅ Check if password exists
+        if (!user.Password) return res.status(400).json({ message: "Password not set for this user" });
 
         // ✅ Compare password
         const isMatch = await bcrypt.compare(password, user.Password);
         if (!isMatch) return res.status(400).json({ message: "Invalid credentials" });
 
-        // ✅ Generate JWT Token
+        // ✅ Generate JWT Token (use environment variable)
+        const SECRET_KEY = process.env.SECRET_KEY || "defaultSecret";
         const token = jwt.sign(
             { userId: user.id, roles: user.Roles, store: user.StoreName },
             SECRET_KEY,
             { expiresIn: "1d" }
         );
 
-        res.json({ token, user: { id: user.id, username: user.username, roles: user.Roles, store: user.StoreName } });
+        // ✅ Response with user details (ensure fields exist)
+        res.json({
+            token,
+            user: {
+                id: user.id,
+                email: user.Email,
+                username:user.username,
+                roles: user.Roles,
+                store: user.StoreName || null,
+            },
+        });
 
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: "Error logging in", error: error.message });
     }
 });
-
+router.post("/logout", (req, res) => {
+    try {
+      res.clearCookie("Authorization", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "None",
+        path: "/",
+      });
+      res.sendStatus(200);
+    } catch (err) {
+      console.error("Logout Error:", err.message);
+      res.sendStatus(400);
+    }
+  });
+  
 module.exports = router;
