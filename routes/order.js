@@ -1,7 +1,6 @@
 const express = require("express");
 const router = express.Router();
 const { getDBPool } = require("../db");
-
 // Function to generate unique Order Number
 const generateOrderNumber = () => {
   return `ORD-${Date.now()}`;
@@ -32,36 +31,27 @@ router.post("/create-order", async (req, res) => {
     return res.status(400).json({ message: "Missing storeName field" });
   }
 
+  // ✅ Generate Order Number **only once**
+  const OrderNo = generateOrderNumber();
+
+  console.log("✅ Generated Order Number:", OrderNo);
+
   try {
-    const cloudPool = getDBPool(true); // Cloud DB
-    const localPool = getDBPool(false); // Local DB
+    const cloudPool = getDBPool(true);
+    const localPool = getDBPool(false);
 
-    // ✅ Get storeId from storeName
-    const [storeResult] = await localPool.query(
-      `SELECT id FROM tblstores WHERE Storename = ? LIMIT 1`,
-      [storeName]
-    );
-
-    if (!storeResult.length) {
-      return res.status(400).json({ message: "Invalid storeName" });
-    }
-
-    const storeId = storeResult[0].id; // ✅ Mapped storeId from storeName
-
-    // ✅ Generate Order Number
-    const OrderNo = generateOrderNumber();
-
-    // ✅ Insert into **CLOUD DB** (tblorders)
+    // ✅ Insert into Cloud DB (tblorders)
     const cloudQuery = `
       INSERT INTO tblorders (
         DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, 
         Sub1No, Sub1Name, Order_Qty, Rcvd_Qty, Amended_Qty, Final_Qty, Amended_Shop
       ) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
 
     const values = [
       DateTime,
-      OrderNo,
+      OrderNo, // ✅ SAME OrderNo used here
       StockCode,
       StockDescription,
       MajorNo,
@@ -76,36 +66,42 @@ router.post("/create-order", async (req, res) => {
     ];
 
     await cloudPool.query(cloudQuery, values);
+    console.log("✅ Inserted into Cloud DB:", OrderNo);
 
+    // ✅ Insert into Local DB (tblorder)
     const localOrderQuery = `
-    INSERT INTO tblorder (
-      DateTime, OrderNo, StoreName, OrderComplete, User
-    ) 
-    VALUES (?, ?, ?, ?, ?)`;
-  
-  // ✅ Insert storeName instead of storeId
-  await localPool.query(localOrderQuery, [DateTime, OrderNo, storeName, 0, "System"]);
-  
+      INSERT INTO tblorder (
+        DateTime, OrderNo, StoreName, OrderComplete, User
+      ) 
+      VALUES (?, ?, ?, ?, ?)
+    `;
 
-    // ✅ Insert into **LOCAL DB** (tblorder_tran)
+    await localPool.query(localOrderQuery, [DateTime, OrderNo, storeName, 0, "System"]);
+    console.log("✅ Inserted into Local DB tblorder:", OrderNo);
+
+    // ✅ Insert into Local DB (tblorder_tran)
     const localOrderTranQuery = `
       INSERT INTO tblorder_tran (
         DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, 
         Sub1No, Sub1Name, Order_Qty, Rcvd_Qty, Amended_Qty, Final_Qty, Amended_Shop
       ) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
 
     await localPool.query(localOrderTranQuery, values);
+    console.log("✅ Inserted into Local DB tblorder_tran:", OrderNo);
 
-    // ✅ Insert into **LOCAL DB** (tblorderboxinfo)  
+    // ✅ Insert into Local DB (tblorderboxinfo) if Box data exists
     if (BoxNo && BoxCodeQty && BoxTotalQty) {
       const localBoxQuery = `
         INSERT INTO tblorderboxinfo (
           OrderNo, StockCode, BoxNo, BoxCodeQty, BoxTotalQty, DoneAndPrinted
         ) 
-        VALUES (?, ?, ?, ?, ?, ?)`;
+        VALUES (?, ?, ?, ?, ?, ?)
+      `;
 
       await localPool.query(localBoxQuery, [OrderNo, StockCode, BoxNo, BoxCodeQty, BoxTotalQty, 0]);
+      console.log("✅ Inserted into Local DB tblorderboxinfo:", OrderNo);
     }
 
     res.status(201).json({
@@ -114,26 +110,60 @@ router.post("/create-order", async (req, res) => {
     });
 
   } catch (error) {
-    console.error(error);
+    console.error("❌ Error creating order:", error);
     res.status(500).json({ message: "Error creating order", error: error.message });
   }
 });
+
+
+
+
 // ✅ Fetch Orders from Local DB with tblorder, tblordertran, tblorderboxingo
 router.get("/orders", async (req, res) => {
   try {
     const localPool = getDBPool(false); // Local DB
 
     const query = `
-      SELECT 
-        o.OrderNo, 
-        o.StoreName, 
-        o.DateTime, 
-        ot.Order_Qty,  -- ✅ Now taking from tblorder_tran
-        ot.Final_Qty
-      FROM tblorder o
-      LEFT JOIN tblorder_tran ot ON o.OrderNo = ot.OrderNo -- ✅ Joining correctly
-      ORDER BY o.DateTime DESC
-    `;
+SELECT 
+    o.OrderNo, 
+    o.StoreName, 
+    o.DateTime,
+    o.Order_Packed_By,
+    o.Order_Packed_Date,
+    o.Order_Approved_By,
+    o.Order_Dispatch_By,
+    o.Order_Dispatched_Date,
+    o.Order_Rcvd_Date,
+    o.User,
+    ot.Order_Qty,  
+    ot.Final_Qty,
+     ot.Amended_Qty
+FROM tblorder o
+LEFT JOIN tblorder_tran ot ON o.OrderNo = ot.OrderNo
+WHERE o.OrderNo IS NOT NULL -- ✅ Ensure OrderNo exists
+
+UNION
+
+SELECT 
+    ot.OrderNo, 
+    NULL AS StoreName, 
+    NULL AS DateTime,
+    NULL AS Order_Packed_By,
+    NULL AS Order_Packed_Date,
+    NULL AS Order_Approved_By,
+    NULL AS Order_Dispatch_By,
+    NULL AS Order_Dispatched_Date,
+    NULL AS Order_Rcvd_Date,
+    NULL AS User,
+    ot.Order_Qty,  
+    ot.Final_Qty,
+    ot.Amended_Qty
+FROM tblorder_tran ot
+LEFT JOIN tblorder o ON o.OrderNo = ot.OrderNo
+WHERE ot.OrderNo IS NOT NULL -- ✅ Ensure OrderNo exists
+
+ORDER BY DateTime DESC;
+  `;
 
     const [orders] = await localPool.query(query);
 
@@ -144,7 +174,6 @@ router.get("/orders", async (req, res) => {
   }
 });
 
-// ✅ Approve Order API (Fixed Column Names)
 router.post("/approve-order", async (req, res) => {
   const { orderId, approvedQty, approvedBy } = req.body;
 
@@ -153,9 +182,10 @@ router.post("/approve-order", async (req, res) => {
   }
 
   const localPool = getDBPool(false); // Local DB
+  const cloudPool = getDBPool(true); // Cloud DB
 
   try {
-    // 🟢 Step 1: Update `Final_Qty` in `tblorder_tran`
+    // 🟢 Step 1: Update `Final_Qty` in `tblorder_tran` (Local)
     const updateOrderTranQuery = `
       UPDATE tblorder_tran 
       SET Final_Qty = ? 
@@ -163,7 +193,7 @@ router.post("/approve-order", async (req, res) => {
     `;
     const [orderTranResult] = await localPool.query(updateOrderTranQuery, [approvedQty, orderId]);
 
-    // 🟢 Step 2: Update `Approved_By` and `Approved_Date` in `tblorder`
+    // 🟢 Step 2: Update `Approved_By` and `Approved_Date` in `tblorder` (Local)
     const updateOrderQuery = `
       UPDATE tblorder 
       SET Order_Approved_By = ?, 
@@ -173,19 +203,28 @@ router.post("/approve-order", async (req, res) => {
     `;
     const [orderResult] = await localPool.query(updateOrderQuery, [approvedBy, orderId]);
 
-    // 🛑 Check if order exists
     if (orderResult.affectedRows === 0 && orderTranResult.affectedRows === 0) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    res.json({ message: "Order approved successfully" });
+    // ✅ Step 3: Sync with Cloud Database
+    const cloudUpdateQuery = `
+      UPDATE warehousemaster.tblorders 
+      SET Order_Approved_By = ?, 
+          OrderComplete = 1, 
+          Order_Approved_Date = NOW() 
+      WHERE OrderNo = ?
+    `;
+    await cloudPool.query(cloudUpdateQuery, [approvedBy, orderId]);
+
+    res.json({ message: "Order approved and synced with cloud successfully" });
 
   } catch (error) {
     console.error("Approval Error:", error);
     res.status(500).json({ message: "Internal server error" });
   }
 });
-// ✅ Pack Order API
+
 router.post("/pack-order", async (req, res) => {
   const { orderId, packedBy } = req.body;
 
@@ -194,9 +233,10 @@ router.post("/pack-order", async (req, res) => {
   }
 
   const localPool = getDBPool(false); // Local DB
+  const cloudPool = getDBPool(true); // Cloud DB
 
   try {
-    // 🟢 Step 1: Update `Order_Packed_By` and `Order_Packed_Date`
+    // 🟢 Step 1: Update `Order_Packed_By` and `Order_Packed_Date` (Local)
     const updatePackedQuery = `
       UPDATE tblorder 
       SET Order_Packed_By = ?, 
@@ -206,12 +246,20 @@ router.post("/pack-order", async (req, res) => {
     
     const [result] = await localPool.query(updatePackedQuery, [packedBy, orderId]);
 
-    // 🛑 Check if the order exists
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    res.json({ message: "Order packed successfully" });
+    // ✅ Step 2: Sync with Cloud Database
+    const cloudUpdateQuery = `
+      UPDATE warehousemaster.tblorders 
+      SET Order_Packed_By = ?, 
+          Order_Packed_Date = NOW() 
+      WHERE OrderNo = ?
+    `;
+    await cloudPool.query(cloudUpdateQuery, [packedBy, orderId]);
+
+    res.json({ message: "Order packed and synced with cloud successfully" });
 
   } catch (error) {
     console.error("Packing Error:", error);
@@ -219,5 +267,96 @@ router.post("/pack-order", async (req, res) => {
   }
 });
 
+
+// ✅ Fetch Only Packed Orders
+router.get("/get-packed-orders", async (req, res) => {
+  try {
+    const localPool = getDBPool(false);
+    const [results] = await localPool.query(
+      "SELECT * FROM tblorder WHERE Order_Packed_By IS NOT NULL AND Order_Dispatch_By IS NULL"
+    );
+    res.json(results);
+  } catch (err) {
+    console.error("Error fetching packed orders:", err);
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+// ✅ Dispatch Order API
+router.post("/dispatch-order", async (req, res) => {
+  const { orderId, dispatchedBy } = req.body;
+  if (!orderId || !dispatchedBy) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+
+  try {
+    const localPool = getDBPool(false); // Local database connection
+    const cloudPool = getDBPool(true);  // Cloud database connection
+
+    // ✅ Update Local Database
+    const [localResult] = await localPool.query(
+      `UPDATE tblorder SET Order_Dispatch_By = ?, Order_Dispatched_Date = NOW() WHERE OrderNo = ?`,
+      [dispatchedBy, orderId]
+    );
+
+    if (localResult.affectedRows === 0) {
+      return res.status(404).json({ message: "Order not found in local DB" });
+    }
+
+    const [cloudResult] = await cloudPool.query(
+      `UPDATE warehousemaster.tblorders SET Order_Dispatch_By = ?, Order_Dispatched_Date = NOW() WHERE OrderNo = ?`,
+      [dispatchedBy, orderId]
+    );
+    
+    if (cloudResult.affectedRows === 0) {
+      console.error("❌ Order not found in cloud DB:", orderId);
+      return res.status(404).json({ message: "Order not found in cloud DB" });
+    }
+    
+
+    // ✅ Sync Shop Database
+    await syncShopDB(orderId);
+
+    res.json({ message: "Order dispatched successfully and updated in cloud DB" });
+  } catch (error) {
+    console.error("Dispatch Error:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+const syncShopDB = async (orderId) => {
+  try {
+    const localPool = getDBPool(false);
+    const [orders] = await localPool.query("SELECT * FROM tblorder WHERE OrderNo = ?", [orderId]);
+
+    if (orders.length === 0) {
+      console.error("❌ Order not found for sync:", orderId);
+      return;
+    }
+
+    const order = orders[0];
+    if (!order.StoreName) {
+      console.error("❌ StoreName missing for order:", orderId);
+      return;
+    }
+
+    // ✅ Ensure shopPool gets the correct store name
+    const shopPool = getDBPool(false, order.StoreName);
+    
+    // ✅ Correct the SQL query (it was missing a parameter)
+    const [shopResult] = await shopPool.query(
+      "UPDATE tblorders SET Order_Dispatch_By = ?, Order_Dispatched_Date = NOW() WHERE OrderNo = ?",
+      [order.Order_Dispatch_By, order.OrderNo] // Fixing missing parameter
+    );
+
+    if (shopResult.affectedRows === 0) {
+      console.error(`❌ Order ${orderId} not found in Shop DB: ${order.StoreName}`);
+    } else {
+      console.log(`✅ Synced Order ${orderId} with Shop DB: ${order.StoreName}`);
+    }
+  } catch (error) {
+    console.error("❌ Error syncing order to shop DB:", error);
+  }
+};
 
 module.exports = router;

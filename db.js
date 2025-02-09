@@ -9,8 +9,6 @@ const cloudPool = mysql.createPool({
   database: process.env.CLOUD_DB_NAME,
   port: process.env.CLOUD_DB_PORT,
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
 });
 
 // Creating the local pool
@@ -21,8 +19,6 @@ const localPool = mysql.createPool({
   database: process.env.LOCAL_DB_NAME,
   port: process.env.LOCAL_DB_PORT,
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
 });
 
 // Export getDBPool function that returns the appropriate pool
