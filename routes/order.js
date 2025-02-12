@@ -5,7 +5,6 @@ const { getDBPool } = require("../db");
 const generateOrderNumber = () => {
   return `ORD-${Date.now()}`;
 };
-
 router.post("/create-order", async (req, res) => {
   const {
     DateTime,
@@ -20,51 +19,44 @@ router.post("/create-order", async (req, res) => {
     Amended_Qty,
     Final_Qty,
     Amended_Shop,
-    storeName, // Store name from frontend
-    BoxNo,
-    BoxCodeQty,
-    BoxTotalQty,
+    storeName,
     User,
   } = req.body;
 
-
-  // ✅ Generate Order Number **only once**
   const OrderNo = generateOrderNumber();
-
   console.log("✅ Generated Order Number:", OrderNo);
 
   try {
     const cloudPool = getDBPool(true);
     const localPool = getDBPool(false);
 
+    // ✅ Insert into Cloud DB (tblorders)
     const cloudQuery = `
-    INSERT INTO tblorders (
-      DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, storeName, 
-      Sub1No, Sub1Name, Order_Qty, Rcvd_Qty, Amended_Qty, Final_Qty, Amended_Shop, User
-    ) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)
-  `;
-  
+      INSERT INTO tblorders (
+        DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, storeName, 
+        Sub1No, Sub1Name, Order_Qty, Rcvd_Qty, Amended_Qty, Final_Qty, Amended_Shop, User
+      ) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
 
-  const values = [
-    DateTime,
-    OrderNo,
-    StockCode,
-    StockDescription,
-    MajorNo,
-    MajorName,
-    storeName,
-    Sub1No || null,
-    Sub1Name || null,
-    parseInt(Order_Qty) || 0, // ✅ Convert to Integer
-    parseInt(Rcvd_Qty) || 0, 
-    parseInt(Amended_Qty) || 0, 
-    parseInt(Final_Qty) || parseInt(Order_Qty) || 0, // ✅ Ensure Final_Qty has a valid number
-    Amended_Shop || null,
-    User || null
-  ];
-  
-    
+    const values = [
+      DateTime,
+      OrderNo,
+      StockCode,
+      StockDescription,
+      MajorNo,
+      MajorName,
+      storeName,
+      Sub1No || null,
+      Sub1Name || null,
+      parseInt(Order_Qty) || 0,
+      parseInt(Rcvd_Qty) || 0,
+      parseInt(Amended_Qty) || 0,
+      parseInt(Final_Qty) || parseInt(Order_Qty) || 0,
+      Amended_Shop || null,
+      User || null,
+    ];
+
     await cloudPool.query(cloudQuery, values);
     console.log("✅ Inserted into Cloud DB:", OrderNo);
 
@@ -79,20 +71,47 @@ router.post("/create-order", async (req, res) => {
     await localPool.query(localOrderQuery, [DateTime, OrderNo, storeName, 0, User]);
     console.log("✅ Inserted into Local DB tblorder:", OrderNo);
 
-    // ✅ Insert into Local DB (tblorder_tran)
-    const localOrderTranQuery = `
-      INSERT INTO tblorder_tran (
-        DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, 
-        Sub1No, Sub1Name, Order_Qty, Rcvd_Qty, Amended_Qty, Final_Qty, Amended_Shop
-      ) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
+  // ✅ Ensure `Final_Qty` is set correctly
+const finalQty = parseInt(Final_Qty) || parseInt(Order_Qty) || 0;
+const amendedQty = parseInt(Amended_Qty) || 0;
 
-    await localPool.query(localOrderTranQuery, values);
-    console.log("✅ Inserted into Local DB tblorder_tran:", OrderNo);
+const localOrderTranQuery = `
+  INSERT INTO tblorder_tran (
+    DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName, 
+    Sub1No, Sub1Name, Order_Qty, Amended_Qty, Final_Qty, Amended_Shop
+  ) 
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
 
-    // ✅ Insert into Local DB (tblorderboxinfo) if Box data exists
-    if (BoxNo && BoxCodeQty && BoxTotalQty) {
+await localPool.query(localOrderTranQuery, [
+  DateTime, OrderNo, StockCode, StockDescription, MajorNo, MajorName,
+  Sub1No || null, Sub1Name || null, parseInt(Order_Qty) || 0,
+  amendedQty, finalQty, Amended_Shop || null
+]);
+
+console.log("✅ Inserted into Local DB tblorder_tran:", OrderNo);
+
+    // ✅ Get `BoxTotalQty` from `tblpacks` based on `StockDescription`
+    const mlMatch = StockDescription.match(/\d+/); // Extract ML value
+    let BoxTotalQty = 0;
+
+    if (mlMatch) {
+      const packSize = parseFloat(mlMatch[0]); // Convert to number
+      const packQuery = "SELECT QtyPerBox FROM tblpacks WHERE Packsize = ?";
+      const [packResult] = await localPool.query(packQuery, [packSize]);
+
+      if (packResult.length > 0) {
+        BoxTotalQty = packResult[0].QtyPerBox || 0;
+      }
+    }
+
+    // ✅ Auto-generate `BoxNo`
+    const boxNoQuery = "SELECT COUNT(*) AS boxCount FROM tblorderboxinfo WHERE OrderNo = ?";
+    const [boxResult] = await localPool.query(boxNoQuery, [OrderNo]);
+    const BoxNo = (boxResult[0].boxCount || 0) + 1;
+
+    // ✅ Insert into Local DB (tblorderboxinfo)
+    if (StockCode) {
       const localBoxQuery = `
         INSERT INTO tblorderboxinfo (
           OrderNo, StockCode, BoxNo, BoxCodeQty, BoxTotalQty, DoneAndPrinted
@@ -100,8 +119,18 @@ router.post("/create-order", async (req, res) => {
         VALUES (?, ?, ?, ?, ?, ?)
       `;
 
-      await localPool.query(localBoxQuery, [OrderNo, StockCode, BoxNo, BoxCodeQty, BoxTotalQty, 0]);
+      await localPool.query(localBoxQuery, [
+        OrderNo, 
+        StockCode, 
+        BoxNo, 
+        parseFloat(Order_Qty) || 0,  // ✅ BoxCodeQty = Order_Qty
+        BoxTotalQty,  // ✅ BoxTotalQty = QtyPerBox from tblpacks
+        0
+      ]);
+
       console.log("✅ Inserted into Local DB tblorderboxinfo:", OrderNo);
+    } else {
+      console.log("⚠️ No valid StockCode provided, skipping tblorderboxinfo insert.");
     }
 
     res.status(201).json({
@@ -117,54 +146,64 @@ router.post("/create-order", async (req, res) => {
 
 
 
-// ✅ Fetch Orders from Local DB with tblorder, tblordertran, tblorderboxingo
+
 router.get("/orders", async (req, res) => {
   try {
     const localPool = getDBPool(false); // Local DB
 
     const query = `
-SELECT 
-    o.OrderNo, 
-    o.StoreName, 
-    o.DateTime,
-    o.Order_Packed_By,
-    o.Order_Packed_Date,
-    o.Order_Approved_By,
-    o.Order_Dispatch_By,
-    o.Order_Dispatched_Date,
-    o.Order_Approved_Date,
-    o.Order_Rcvd_Date,
-    o.User,
-    ot.Order_Qty,  
-    ot.Final_Qty,
-     ot.Amended_Qty
-FROM tblorder o
-LEFT JOIN tblorder_tran ot ON o.OrderNo = ot.OrderNo
-WHERE o.OrderNo IS NOT NULL -- ✅ Ensure OrderNo exists
+    SELECT 
+        o.OrderNo, 
+        o.StoreName, 
+        o.DateTime,
+        o.Order_Packed_By,
+        o.Order_Packed_Date,
+        o.Order_Approved_By,
+        o.Order_Dispatch_By,
+        o.Order_Dispatched_Date,
+        o.Order_Approved_Date,
+        o.Order_Rcvd_Date,
+        o.User,
+        ot.Order_Qty,  
+        ot.Final_Qty,
+        ot.Amended_Qty,
+        obi.BoxNo,
+        obi.BoxCodeQty,
+        obi.BoxTotalQty,
+        obi.DoneAndPrinted
+    FROM tblorder o
+    LEFT JOIN tblorder_tran ot ON o.OrderNo = ot.OrderNo
+    LEFT JOIN tblorderboxinfo obi ON o.OrderNo = obi.OrderNo -- ✅ Added tblorderboxinfo
+    WHERE o.OrderNo IS NOT NULL -- ✅ Ensure OrderNo exists
 
-UNION
+    UNION
 
-SELECT 
-    ot.OrderNo, 
-    NULL AS StoreName, 
-    NULL AS DateTime,
-    NULL AS Order_Packed_By,
-    NULL AS Order_Packed_Date,
-    NULL AS Order_Approved_By,
-    NULL AS Order_Dispatch_By,
-    NULL AS Order_Dispatched_Date,
-      NULL AS Order_Approved_Date,
-    NULL AS Order_Rcvd_Date,
-    NULL AS User,
-    ot.Order_Qty,  
-    ot.Final_Qty,
-    ot.Amended_Qty
-FROM tblorder_tran ot
-LEFT JOIN tblorder o ON o.OrderNo = ot.OrderNo
-WHERE ot.OrderNo IS NOT NULL -- ✅ Ensure OrderNo exists
+    SELECT 
+        ot.OrderNo, 
+        NULL AS StoreName, 
+        NULL AS DateTime,
+        NULL AS Order_Packed_By,
+        NULL AS Order_Packed_Date,
+        NULL AS Order_Approved_By,
+        NULL AS Order_Dispatch_By,
+        NULL AS Order_Dispatched_Date,
+        NULL AS Order_Approved_Date,
+        NULL AS Order_Rcvd_Date,
+        NULL AS User,
+        ot.Order_Qty,  
+        ot.Final_Qty,
+        ot.Amended_Qty,
+        obi.BoxNo,
+        obi.BoxCodeQty,
+        obi.BoxTotalQty,
+        obi.DoneAndPrinted
+    FROM tblorder_tran ot
+    LEFT JOIN tblorder o ON o.OrderNo = ot.OrderNo
+    LEFT JOIN tblorderboxinfo obi ON ot.OrderNo = obi.OrderNo -- ✅ Join box info with transactions
+    WHERE ot.OrderNo IS NOT NULL -- ✅ Ensure OrderNo exists
 
-ORDER BY DateTime DESC;
-  `;
+    ORDER BY DateTime DESC;
+    `;
 
     const [orders] = await localPool.query(query);
 
@@ -268,7 +307,6 @@ router.post("/pack-order", async (req, res) => {
   }
 });
 
-
 // ✅ Fetch Only Packed Orders
 router.get("/get-packed-orders", async (req, res) => {
   try {
@@ -321,6 +359,38 @@ router.post("/dispatch-order", async (req, res) => {
     res.json({ message: "Order dispatched successfully and updated in cloud DB" });
   } catch (error) {
     console.error("Dispatch Error:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+router.get("/order-packing/:orderNo", async (req, res) => {
+  const { orderNo } = req.params;
+  const localPool = getDBPool(false);
+
+  try {
+    const query = `
+  SELECT 
+    o.OrderNo, 
+    o.StockCode, 
+    o.Order_Qty, 
+    CAST(b.BoxNo AS CHAR) AS BoxNo,  -- ✅ Convert Buffer to String
+    COALESCE(b.BoxTotalQty, 0) AS BoxTotalQty,
+    p.QtyPerBox,
+    o.StockDescription
+FROM tblorder_tran o
+LEFT JOIN tblorderboxinfo b 
+    ON o.OrderNo = b.OrderNo 
+    AND o.StockCode = b.StockCode
+LEFT JOIN tblpacks p 
+    ON o.StockDescription LIKE CONCAT('%', p.Packdescription, '%')
+WHERE o.OrderNo = ?;
+
+;
+    `;
+    const [rows] = await localPool.query(query, [orderNo]);
+
+    res.json(rows);
+  } catch (error) {
+    console.error("Error fetching order packing data:", error);
     res.status(500).json({ message: "Internal server error" });
   }
 });
