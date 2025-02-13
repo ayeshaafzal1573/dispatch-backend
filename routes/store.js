@@ -142,8 +142,8 @@ router.put('/update-order-status', async (req, res) => {
   
       // Update tblorders (Local DB) - received date and status
       const localOrderQuery = `
-        UPDATE tblorder_tran
-        SET Order_Rcvd_Date = ?, OrderStatus = ?
+        UPDATE tblorder
+        SET Order_Rcvd_Date = ?, OrderComplete = ?
         WHERE OrderNo = ?
       `;
       await localConnection.query(localOrderQuery, [receivedDate, status, OrderNo]);

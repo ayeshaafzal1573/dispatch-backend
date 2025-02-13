@@ -225,14 +225,7 @@ router.post("/approve-order", async (req, res) => {
   const cloudPool = getDBPool(true); // Cloud DB
 
   try {
-    // 🟢 Step 1: Update `Final_Qty` in `tblorder_tran` (Local)
-    const updateOrderTranQuery = `
-      UPDATE tblorder_tran 
-      SET Final_Qty = ? 
-      WHERE OrderNo = ?
-    `;
-    const [orderTranResult] = await localPool.query(updateOrderTranQuery, [approvedQty, orderId]);
-
+    
     // 🟢 Step 2: Update `Approved_By` and `Approved_Date` in `tblorder` (Local)
     const updateOrderQuery = `
       UPDATE tblorder 
@@ -266,9 +259,9 @@ router.post("/approve-order", async (req, res) => {
 });
 
 router.post("/pack-order", async (req, res) => {
-  const { orderId, packedBy } = req.body;
+  const { orderId, packedBy, amendedQty } = req.body; // Amended Qty added
 
-  if (!orderId || !packedBy) {
+  if (!orderId || !packedBy || !amendedQty) {
     return res.status(400).json({ message: "Missing required fields" });
   }
 
@@ -276,30 +269,37 @@ router.post("/pack-order", async (req, res) => {
   const cloudPool = getDBPool(true); // Cloud DB
 
   try {
-    // 🟢 Step 1: Update `Order_Packed_By` and `Order_Packed_Date` (Local)
+    // ✅ Step 1: Update Local DB (`tblorder` and `tblorder_tran`)
     const updatePackedQuery = `
       UPDATE tblorder 
       SET Order_Packed_By = ?, 
-          Order_Packed_Date = NOW() 
+          Order_Packed_Date = NOW()
       WHERE OrderNo = ?
     `;
-    
-    const [result] = await localPool.query(updatePackedQuery, [packedBy, orderId]);
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Order not found" });
-    }
+    await localPool.query(updatePackedQuery, [packedBy, amendedQty, orderId]);
 
-    // ✅ Step 2: Sync with Cloud Database
+    // ✅ Step 2: Update `tblorder_tran`
+    const updateTransactionQuery = `
+      UPDATE tblorder_tran 
+      SET Amended_Qty = ? 
+      WHERE OrderNo = ?
+    `;
+
+    await localPool.query(updateTransactionQuery, [amendedQty, orderId]);
+
+    // ✅ Step 3: Sync with Cloud Database (`warehousemaster.tblorders`)
     const cloudUpdateQuery = `
       UPDATE warehousemaster.tblorders 
       SET Order_Packed_By = ?, 
+          Amended_Qty = ?, 
           Order_Packed_Date = NOW() 
       WHERE OrderNo = ?
     `;
-    await cloudPool.query(cloudUpdateQuery, [packedBy, orderId]);
 
-    res.json({ message: "Order packed and synced with cloud successfully" });
+    await cloudPool.query(cloudUpdateQuery, [packedBy, amendedQty, orderId]);
+
+    res.json({ message: "Order packed, amended quantity updated, and synced with cloud successfully" });
 
   } catch (error) {
     console.error("Packing Error:", error);
@@ -307,13 +307,36 @@ router.post("/pack-order", async (req, res) => {
   }
 });
 
-// ✅ Fetch Only Packed Orders
 router.get("/get-packed-orders", async (req, res) => {
   try {
     const localPool = getDBPool(false);
-    const [results] = await localPool.query(
-      "SELECT * FROM tblorder WHERE Order_Packed_By IS NOT NULL AND Order_Dispatch_By IS NULL"
-    );
+
+    const query = `
+      SELECT 
+        o.OrderNo, 
+        o.StoreName, 
+        o.DateTime,
+        o.Order_Packed_By,
+        o.Order_Packed_Date,
+        o.Order_Approved_By,
+        o.Order_Dispatch_By,
+        o.Order_Dispatched_Date,
+        o.Order_Approved_Date,
+        o.Order_Rcvd_Date,
+        ot.Order_Qty,  
+        ot.Final_Qty,
+        ot.Amended_Qty,
+        obi.BoxNo,
+        obi.BoxCodeQty,
+        obi.BoxTotalQty 
+      FROM tblorder o
+      LEFT JOIN tblorder_tran ot ON o.OrderNo = ot.OrderNo
+      LEFT JOIN tblorderboxinfo obi ON o.OrderNo = obi.OrderNo
+      WHERE o.Order_Packed_By IS NOT NULL AND o.Order_Dispatch_By IS NULL
+    `;
+
+    const [results] = await localPool.query(query);
+
     res.json(results);
   } catch (err) {
     console.error("Error fetching packed orders:", err);
@@ -321,10 +344,10 @@ router.get("/get-packed-orders", async (req, res) => {
   }
 });
 
-// ✅ Dispatch Order API
 router.post("/dispatch-order", async (req, res) => {
-  const { orderId, dispatchedBy } = req.body;
-  if (!orderId || !dispatchedBy) {
+  const { orderId, dispatchedBy, finalQty } = req.body;
+
+  if (!orderId || !dispatchedBy || finalQty === undefined) {
     return res.status(400).json({ message: "Missing required fields" });
   }
 
@@ -332,36 +355,54 @@ router.post("/dispatch-order", async (req, res) => {
     const localPool = getDBPool(false); // Local database connection
     const cloudPool = getDBPool(true);  // Cloud database connection
 
-    // ✅ Update Local Database
-    const [localResult] = await localPool.query(
-      `UPDATE tblorder SET Order_Dispatch_By = ?, Order_Dispatched_Date = NOW() WHERE OrderNo = ?`,
+    // ✅ Update Local Database: tblorder (Dispatch Details)
+    const [localOrderUpdate] = await localPool.query(
+      `UPDATE tblorder 
+       SET Order_Dispatch_By = ?, Order_Dispatched_Date = NOW() 
+       WHERE OrderNo = ?`,
       [dispatchedBy, orderId]
     );
 
-    if (localResult.affectedRows === 0) {
+    if (localOrderUpdate.affectedRows === 0) {
       return res.status(404).json({ message: "Order not found in local DB" });
     }
 
-    const [cloudResult] = await cloudPool.query(
-      `UPDATE warehousemaster.tblorders SET Order_Dispatch_By = ?, Order_Dispatched_Date = NOW() WHERE OrderNo = ?`,
-      [dispatchedBy, orderId]
+    // ✅ Update Local Database: tblorder_tran (Final Qty)
+    const [localFinalQtyUpdate] = await localPool.query(
+      `UPDATE tblorder_tran 
+       SET Final_Qty = ? 
+       WHERE OrderNo = ?`,
+      [finalQty, orderId]
     );
-    
+
+    if (localFinalQtyUpdate.affectedRows === 0) {
+      console.warn("⚠️ Warning: Order not found in tblorder_tran for OrderNo:", orderId);
+    }
+
+    // ✅ Update Cloud Database
+    const [cloudResult] = await cloudPool.query(
+      `UPDATE warehousemaster.tblorders 
+       SET Order_Dispatch_By = ?, Order_Dispatched_Date = NOW(), Final_Qty = ? 
+       WHERE OrderNo = ?`,
+      [dispatchedBy, finalQty, orderId]
+    );
+
     if (cloudResult.affectedRows === 0) {
       console.error("❌ Order not found in cloud DB:", orderId);
       return res.status(404).json({ message: "Order not found in cloud DB" });
     }
-    
 
     // ✅ Sync Shop Database
     await syncShopDB(orderId);
 
-    res.json({ message: "Order dispatched successfully and updated in cloud DB" });
+    res.json({ message: "Order dispatched successfully, FinalQty updated in all tables." });
   } catch (error) {
     console.error("Dispatch Error:", error);
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
+
 router.get("/order-packing/:orderNo", async (req, res) => {
   const { orderNo } = req.params;
   const localPool = getDBPool(false);
