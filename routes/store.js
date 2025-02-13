@@ -107,77 +107,125 @@ router.get("/store-orders", async (req, res) => {
 });
 // API to update order status and received date
 router.put('/update-order-status', async (req, res) => {
-    const { OrderNo, status, receivedDate, amendedQty } = req.body;
-  
-    let cloudConnection;
-    let localConnection;
-  
-    try {
+  const { OrderNo, status, receivedDate, receivedQty } = req.body; // Removed Amended_Qty
+
+  let cloudConnection;
+  let localConnection;
+
+  try {
       const cloudPool = getDBPool(true);  // Cloud DB
       const localPool = getDBPool(false); // Local DB
-  
-      // Get individual connections from the pool
+
+      // Get connections from pool
       cloudConnection = await cloudPool.getConnection();
       localConnection = await localPool.getConnection();
-  
-      // Start transactions for both DBs
+
+      // Start transactions
       await cloudConnection.beginTransaction();
       await localConnection.beginTransaction();
-  
-      // Update tblorders (Cloud DB) - received date and status
+
+      // ✅ Update `tblorders` (Cloud DB)
       const cloudOrderQuery = `
-        UPDATE tblorders
-        SET Order_Rcvd_Date = ?
-        WHERE OrderNo = ?
+          UPDATE tblorders 
+          SET Order_Rcvd_Date = NOW(), OrderComplete = 1, 
+          Rcvd_Qty = ? 
+          WHERE OrderNo = ?
       `;
-      await cloudConnection.query(cloudOrderQuery, [receivedDate, status, OrderNo]);
-  
-      // Update tblorder_tran (Cloud DB) - amended quantity
-      const cloudOrderTranQuery = `
-        UPDATE tblorders
-        SET Amended_Qty = ?
-        WHERE OrderNo = ?
-      `;
-      await cloudConnection.query(cloudOrderTranQuery, [amendedQty, OrderNo]);
-  
-      // Update tblorders (Local DB) - received date and status
+      await cloudConnection.query(cloudOrderQuery, [status, receivedQty, OrderNo]); // ✅ Fixed parameter order
+
+      // ✅ Update `tblorder` (Local DB)
       const localOrderQuery = `
-        UPDATE tblorder
-        SET Order_Rcvd_Date = ?, OrderComplete = ?
-        WHERE OrderNo = ?
+          UPDATE tblorder 
+          SET Order_Rcvd_Date = NOW(), OrderComplete = 1 
+          WHERE OrderNo = ?
       `;
-      await localConnection.query(localOrderQuery, [receivedDate, status, OrderNo]);
-  
-      // Update tblorder_tran (Local DB) - amended quantity
+      await localConnection.query(localOrderQuery, [status, OrderNo]);
+
+      // ✅ Update `tblorder_tran` (Local DB) - Received Qty
       const localOrderTranQuery = `
-        UPDATE tblorder_tran
-        SET Amended_Qty = ?
-        WHERE OrderNo = ?
+          UPDATE tblorder_tran 
+          SET Rcvd_Qty = ? 
+          WHERE OrderNo = ?
       `;
-      await localConnection.query(localOrderTranQuery, [amendedQty, OrderNo]);
-  
-      // Commit the transactions for both databases
+      await localConnection.query(localOrderTranQuery, [receivedQty, OrderNo]); // ✅ Fixed query params
+
+      // ✅ Commit Transactions
       await cloudConnection.commit();
       await localConnection.commit();
-  
-      res.status(200).json({ message: 'Order status and received date updated successfully!' });
-  
-    } catch (error) {
-      // Rollback transactions in case of any error
+
+      res.status(200).json({ message: 'Order status and received details updated successfully!' });
+
+  } catch (error) {
+      // ❌ Rollback on Error
       if (cloudConnection) await cloudConnection.rollback();
       if (localConnection) await localConnection.rollback();
+
       console.error('Error updating order status:', error);
       res.status(500).json({ message: 'Error updating order status', error: error.message });
-    } finally {
-      // Ensure connections are released in the finally block
-      if (cloudConnection) {
-        cloudConnection.release();
-      }
-      if (localConnection) {
-        localConnection.release();
-      }
+
+  } finally {
+      // ✅ Ensure connections are released
+      if (cloudConnection) cloudConnection.release();
+      if (localConnection) localConnection.release();
+  }
+});
+
+;
+// API: Shop Confirm Stock Receipt
+router.post("/confirm-receipt", async (req, res) => {
+  const { shopId, orderId, receivedItems, receivedBy, invoiceNumber, supplierCode } = req.body;
+  if (!shopId || !orderId || !receivedItems || receivedItems.length === 0) {
+    return res.status(400).json({ message: "Invalid request data" });
+  }
+
+  const connection = await db.getConnection();
+  await connection.beginTransaction();
+
+  try {
+    // Insert GRN Entry
+    await connection.query(
+      `INSERT INTO tbldata_grn (GRVNum, InvoiceNumber, InvoiceName, SupplierCode, DateTime) 
+       VALUES (?, ?, ?, ?, NOW())`,
+      [orderId, invoiceNumber, `Shop-${shopId}`, supplierCode]
+    );
+
+    // Insert GRN Details & Update Inventory
+    for (const item of receivedItems) {
+      await connection.query(
+        `INSERT INTO tbldata_grn_det (DateTime, InvoiceNumber, TransactionNumber, StockCode, CreditorItemCode, Description, 
+         QuantityReceived, BonusQuantity, QuantityOrdered, ExclusiveUnitCost, InclusiveUnitCost, Markup, 
+         ExclusiveSelling, InclusiveSelling, VATPercentage, Discount1, Discount2, DiscountCurrency, LineTotal, 
+         GRVNum, Shipping, Handling, Other, Subtotal, Discount, VAT, SupplierCode, User, hisYear, hisMonth, hisDay, ShipSuppl, Comment) 
+         VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+        [invoiceNumber, orderId, item.stockCode, item.creditorItemCode, item.description, 
+         item.receivedQty, item.bonusQty, item.orderedQty, item.exclusiveUnitCost, item.inclusiveUnitCost, 
+         item.markup, item.exclusiveSelling, item.inclusiveSelling, item.vatPercentage, item.discount1, item.discount2, 
+         item.discountCurrency, item.lineTotal, orderId, item.shipping, item.handling, item.other, item.subtotal, 
+         item.discount, item.vat, supplierCode, receivedBy, item.hisYear, item.hisMonth, item.hisDay, item.shipSuppl, item.comment]
+      );
+      
+      await connection.query(
+        `UPDATE tbl_product SET StockonHand = current_stock + ? WHERE StockCode = ?`,
+        [item.receivedQty, item.stockCode]
+      );
     }
-  });
-  
+
+    // Update Order Status
+    await connection.query(
+      `UPDATE tblorders SET OrderComplete = 1, WHERE StockCode = ?`,
+      [orderId]
+    );
+
+    await connection.commit();
+    res.json({ message: "Stock receipt confirmed successfully" });
+  } catch (error) {
+    await connection.rollback();
+    res.status(500).json({ message: "Error processing request", error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+
 
 module.exports = router;
