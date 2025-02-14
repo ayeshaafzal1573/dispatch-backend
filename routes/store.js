@@ -108,6 +108,44 @@ router.get("/store-orders", async (req, res) => {
     }
   }
 });
+router.get("/order-details/:orderNo", async (req, res) => {
+  const { orderNo } = req.params;
+  let cloudConnection, localConnection;
+
+  try {
+    const cloudPool = getDBPool(true);
+    const localPool = getDBPool(false);
+
+    cloudConnection = await cloudPool.getConnection();
+    localConnection = await localPool.getConnection();
+
+    // Cloud DB Query
+    const cloudOrderDetailsQuery = `
+      SELECT StockCode, StockDescription, Order_Qty, Rcvd_Qty 
+      FROM tblorders WHERE OrderNo = ?
+    `;
+    const [cloudOrderDetails] = await cloudConnection.query(cloudOrderDetailsQuery, [orderNo]);
+
+    // Local DB Query
+    const localOrderDetailsQuery = `
+      SELECT t.StockCode, t.StockDescription, t.Order_Qty, t.Rcvd_Qty 
+      FROM tblorder_tran t WHERE t.OrderNo = ?
+    `;
+    const [localOrderDetails] = await localConnection.query(localOrderDetailsQuery, [orderNo]);
+
+    // Combine Both Results
+    const orderDetails = [...cloudOrderDetails, ...localOrderDetails];
+
+    res.status(200).json({ orderDetails });
+  } catch (error) {
+    console.error("Error fetching order details:", error);
+    res.status(500).json({ message: "Error fetching order details", error: error.message });
+  } finally {
+    if (cloudConnection) cloudConnection.release();
+    if (localConnection) localConnection.release();
+  }
+});
+
 // API to update order status and received date
 router.put('/update-order-status', async (req, res) => {
   const { OrderNo, status, receivedDate, receivedQty } = req.body; // Removed Amended_Qty
@@ -197,21 +235,31 @@ router.post("/confirm-receipt", async (req, res) => {
     // 🔹 Generate Unique GRV Number
     const grvNumber = `GRV-${Date.now()}`;
 
-    // 🔹 Insert GRN Entry
+    // 🔹 Insert GRN Entry in tbldata_grn
     await connection.query(
-      `INSERT INTO tbldata_grn (GRVNum, InvoiceNumber, InvoiceName, SupplierCode, DateTime) 
-       VALUES (?, ?, ?, ?, NOW())`,
-      [grvNumber, invoiceNumber, `Shop-${shopId}`, supplierCode]
+      `INSERT INTO tbldata_grn (GRVNum, InvoiceNumber, InvoiceName, SupplierCode, Shipping, Handling, Other, SubTotal, Discount, VAT, DateTime, HisDay, HisMonth, HisYear) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), DAY(NOW()), MONTH(NOW()), YEAR(NOW()))`,
+      [grvNumber, invoiceNumber, `Shop-${shopId}`, supplierCode, 0, 0, 0, 0, 0, 0]
     );
 
     let totalReceived = 0;
     let totalOrdered = 0;
-
-    // 🔹 Insert GRN Details & Update Inventory
+    const now = new Date();
+    const hisYear = now.getFullYear(); 
+    const hisMonth = now.getMonth() + 1; 
+    const hisDay = now.getDate();
     for (const item of receivedItems) {
-      totalReceived += item.receivedQty;
-      totalOrdered += item.orderedQty || 0;
-
+      const transactionNumber = `GRV-${Date.now()}-${item.stockCode}`; // ✅ Define inside the loop
+      
+      // 🔹 Calculate Subtotal (Quantity Received * Unit Cost)
+      const subtotal = (item.receivedQty || 0) * (item.exclusiveUnitCost || 0);
+    
+      // 🔹 Calculate Discount (if applicable)
+      const discountAmount = subtotal * ((item.discount1 || 0) / 100); // Apply discount percentage
+    
+      // 🔹 Calculate VAT (if applicable)
+      const vatAmount = (subtotal - discountAmount) * ((item.vatPercentage || 0) / 100);
+    
       await connection.query(
         `INSERT INTO tbldata_grn_det (
           DateTime, InvoiceNumber, TransactionNumber, StockCode, CreditorItemCode, Description, 
@@ -219,30 +267,33 @@ router.post("/confirm-receipt", async (req, res) => {
           Markup, ExclusiveSelling, InclusiveSelling, VATPercentage, Discount1, Discount2, 
           DiscountCurrency, LineTotal, GRVNum, Shipping, Handling, Other, Subtotal, Discount, 
           VAT, SupplierCode, User, hisYear, hisMonth, hisDay, ShipSuppl, Comment
-      ) 
-         VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+        ) 
+        VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    
         [
-          invoiceNumber, grvNumber, 
+          invoiceNumber, transactionNumber, 
           item.stockCode || null, item.creditorItemCode || null, item.description || null, 
           item.receivedQty || 0, item.bonusQty || 0, item.orderedQty || 0, 
           item.exclusiveUnitCost || 0, item.inclusiveUnitCost || 0, item.markup || 0, 
           item.exclusiveSelling || 0, item.inclusiveSelling || 0, item.vatPercentage || 0, 
           item.discount1 || 0, item.discount2 || 0, item.discountCurrency || null, 
-          item.lineTotal || 0, grvNumber, 
-          item.shipping || 0, item.handling || 0, item.other || 0, item.subtotal || 0, 
-          item.discount || 0, item.vat || 0, supplierCode, 
-          receivedBy, item.hisYear || null, item.hisMonth || null, item.hisDay || null, 
+          subtotal, grvNumber, 
+          item.shipping || 0, item.handling || 0, item.other || 0, subtotal, 
+          discountAmount, vatAmount, supplierCode, 
+          receivedBy, item.hisYear || hisYear, item.hisMonth || hisMonth, item.hisDay || hisDay, 
           item.shipSuppl || null, item.comment || null
         ]
       );
-
-      // 🔹 Update Stock Quantity in `tbl_product`
+    
+      // 🔹 Update StockOnHand in tblproducts
       await connection.query(
-        `UPDATE tbl_product SET StockonHand = StockonHand + ? WHERE StockCode = ?`,
-        [item.receivedQty, item.stockCode]
+        `UPDATE tblproducts 
+         SET StockOnHand = COALESCE(StockOnHand, 0) + ? 
+         WHERE StockCode = ?`,
+        [item.receivedQty || 0, item.stockCode]
       );
     }
-
+    
     // 🔹 Check if Order is Fully Received
     let orderComplete = totalReceived >= totalOrdered ? 1 : 0;
 
@@ -262,6 +313,5 @@ router.post("/confirm-receipt", async (req, res) => {
     connection.release();
   }
 });
-
 
 module.exports = router;
