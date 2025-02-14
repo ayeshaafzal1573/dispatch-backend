@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { getDBPool } = require('../db');
+const db = require('../db');
+const cloudPool = getDBPool(true); // ✅ Initialize Cloud DB Pool
+
 
 // Fetch store orders from both cloud and local databases
 router.get("/store-orders", async (req, res) => {
@@ -171,61 +174,94 @@ router.put('/update-order-status', async (req, res) => {
 });
 
 ;
-// API: Shop Confirm Stock Receipt
 router.post("/confirm-receipt", async (req, res) => {
-  const { shopId, orderId, receivedItems, receivedBy, invoiceNumber, supplierCode } = req.body;
-  if (!shopId || !orderId || !receivedItems || receivedItems.length === 0) {
+  const { shopId, orderNo, receivedItems, receivedBy, invoiceNumber, supplierCode } = req.body;
+
+  if (!shopId || !orderNo || !receivedItems || receivedItems.length === 0) {
     return res.status(400).json({ message: "Invalid request data" });
   }
 
-  const connection = await db.getConnection();
+  const connection = await cloudPool.getConnection();
   await connection.beginTransaction();
 
   try {
-    // Insert GRN Entry
+    // 🔹 Check if Order Exists
+    const [orderExists] = await connection.query(
+      `SELECT OrderNo FROM tblorders WHERE OrderNo = ?`, 
+      [orderNo]
+    );
+    if (orderExists.length === 0) {
+      return res.status(400).json({ message: "Order not found" });
+    }
+
+    // 🔹 Generate Unique GRV Number
+    const grvNumber = `GRV-${Date.now()}`;
+
+    // 🔹 Insert GRN Entry
     await connection.query(
       `INSERT INTO tbldata_grn (GRVNum, InvoiceNumber, InvoiceName, SupplierCode, DateTime) 
        VALUES (?, ?, ?, ?, NOW())`,
-      [orderId, invoiceNumber, `Shop-${shopId}`, supplierCode]
+      [grvNumber, invoiceNumber, `Shop-${shopId}`, supplierCode]
     );
 
-    // Insert GRN Details & Update Inventory
+    let totalReceived = 0;
+    let totalOrdered = 0;
+
+    // 🔹 Insert GRN Details & Update Inventory
     for (const item of receivedItems) {
+      totalReceived += item.receivedQty;
+      totalOrdered += item.orderedQty || 0;
+
       await connection.query(
-        `INSERT INTO tbldata_grn_det (DateTime, InvoiceNumber, TransactionNumber, StockCode, CreditorItemCode, Description, 
-         QuantityReceived, BonusQuantity, QuantityOrdered, ExclusiveUnitCost, InclusiveUnitCost, Markup, 
-         ExclusiveSelling, InclusiveSelling, VATPercentage, Discount1, Discount2, DiscountCurrency, LineTotal, 
-         GRVNum, Shipping, Handling, Other, Subtotal, Discount, VAT, SupplierCode, User, hisYear, hisMonth, hisDay, ShipSuppl, Comment) 
+        `INSERT INTO tbldata_grn_det (
+          DateTime, InvoiceNumber, TransactionNumber, StockCode, CreditorItemCode, Description, 
+          QuantityReceived, BonusQuantity, QuantityOrdered, ExclusiveUnitCost, InclusiveUnitCost, 
+          Markup, ExclusiveSelling, InclusiveSelling, VATPercentage, Discount1, Discount2, 
+          DiscountCurrency, LineTotal, GRVNum, Shipping, Handling, Other, Subtotal, Discount, 
+          VAT, SupplierCode, User, hisYear, hisMonth, hisDay, ShipSuppl, Comment
+      ) 
          VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
-        [invoiceNumber, orderId, item.stockCode, item.creditorItemCode, item.description, 
-         item.receivedQty, item.bonusQty, item.orderedQty, item.exclusiveUnitCost, item.inclusiveUnitCost, 
-         item.markup, item.exclusiveSelling, item.inclusiveSelling, item.vatPercentage, item.discount1, item.discount2, 
-         item.discountCurrency, item.lineTotal, orderId, item.shipping, item.handling, item.other, item.subtotal, 
-         item.discount, item.vat, supplierCode, receivedBy, item.hisYear, item.hisMonth, item.hisDay, item.shipSuppl, item.comment]
+        [
+          invoiceNumber, grvNumber, 
+          item.stockCode || null, item.creditorItemCode || null, item.description || null, 
+          item.receivedQty || 0, item.bonusQty || 0, item.orderedQty || 0, 
+          item.exclusiveUnitCost || 0, item.inclusiveUnitCost || 0, item.markup || 0, 
+          item.exclusiveSelling || 0, item.inclusiveSelling || 0, item.vatPercentage || 0, 
+          item.discount1 || 0, item.discount2 || 0, item.discountCurrency || null, 
+          item.lineTotal || 0, grvNumber, 
+          item.shipping || 0, item.handling || 0, item.other || 0, item.subtotal || 0, 
+          item.discount || 0, item.vat || 0, supplierCode, 
+          receivedBy, item.hisYear || null, item.hisMonth || null, item.hisDay || null, 
+          item.shipSuppl || null, item.comment || null
+        ]
       );
-      
+
+      // 🔹 Update Stock Quantity in `tbl_product`
       await connection.query(
-        `UPDATE tbl_product SET StockonHand = current_stock + ? WHERE StockCode = ?`,
+        `UPDATE tbl_product SET StockonHand = StockonHand + ? WHERE StockCode = ?`,
         [item.receivedQty, item.stockCode]
       );
     }
 
-    // Update Order Status
+    // 🔹 Check if Order is Fully Received
+    let orderComplete = totalReceived >= totalOrdered ? 1 : 0;
+
+    // 🔹 Update Order Status
     await connection.query(
-      `UPDATE tblorders SET OrderComplete = 1, WHERE StockCode = ?`,
-      [orderId]
+      `UPDATE tblorders SET OrderComplete = ? WHERE OrderNo = ?`,
+      [orderComplete, orderNo]
     );
 
     await connection.commit();
-    res.json({ message: "Stock receipt confirmed successfully" });
+    res.json({ message: "Stock receipt confirmed successfully", grvNumber });
   } catch (error) {
     await connection.rollback();
+    console.error("Error processing stock receipt:", error);
     res.status(500).json({ message: "Error processing request", error: error.message });
   } finally {
     connection.release();
   }
 });
-
 
 
 module.exports = router;
