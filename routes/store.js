@@ -2,8 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { getDBPool } = require('../db');
 const db = require('../db');
-const cloudPool = getDBPool(true); // ✅ Initialize Cloud DB Pool
-
+const cloudPool = getDBPool(true);
+const localPool = getDBPool(false);
 
 // Fetch store orders from both cloud and local databases
 router.get("/store-orders", async (req, res) => {
@@ -313,5 +313,40 @@ router.post("/confirm-receipt", async (req, res) => {
     connection.release();
   }
 });
+router.get("/discrepancy-report", async (req, res) => {
+  const connection = await localPool.getConnection();
+  try {
+    const [discrepancies] = await connection.query(`
+      SELECT OrderNo, StockCode, Order_Qty, Rcvd_Qty, 
+             (Order_Qty - Rcvd_Qty) AS missingQty
+      FROM tblorder_tran 
+      WHERE Rcvd_Qty < Order_Qty
+    `);
+    
+    res.json({ discrepancies });
+  } catch (error) {
+    console.error("Error fetching discrepancies:", error);
+    res.status(500).json({ message: "Error fetching discrepancies" });
+  } finally {
+    connection.release();
+  }
+ 
+  
+});
+router.get("/warehouse-stock", async (req, res) => {
+  const connection = await cloudPool.getConnection();
 
+  try {
+    const [stock] = await connection.query(
+      `SELECT StockCode, Description1, StockOnHand, MinStock, MaxStock 
+       FROM tblproducts WHERE StockOnHand > 0`
+    );
+    res.json({ stock });
+  } catch (error) {
+    console.error("Error fetching warehouse stock:", error);
+    res.status(500).json({ message: "Error fetching stock data" });
+  } finally {
+    connection.release();
+  }
+});
 module.exports = router;

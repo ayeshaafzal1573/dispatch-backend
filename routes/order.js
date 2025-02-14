@@ -277,7 +277,7 @@ router.post("/pack-order", async (req, res) => {
       WHERE OrderNo = ?
     `;
 
-    await localPool.query(updatePackedQuery, [packedBy, amendedQty, orderId]);
+    await localPool.query(updatePackedQuery, [packedBy, orderId]);
 
     // ✅ Step 2: Update `tblorder_tran`
     const updateTransactionQuery = `
